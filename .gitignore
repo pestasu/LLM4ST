@@ -1,0 +1,5 @@
+# ignore directory
+data 
+saved
+pretrained_model
+test_results

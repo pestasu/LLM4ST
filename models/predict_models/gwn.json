@@ -1,0 +1,14 @@
+{
+    "dropout": 0.3,
+    "blocks": 4,
+    "layers": 3,
+    "gcn_bool": true,
+    "addaptadj": true,
+    "adjtype": "doubletransition",
+    "randomadj": true,
+    "aptonly": true,
+    "kernel_size": 2,
+    "nhid": 32,
+    "residual_channels": 32,
+    "dilation_channels": 32
+}
