@@ -1,14 +1,14 @@
 import os
 import logging
-from models import *
-from sklearn.preprocessing import StandardScaler
-from utils.metrics import masked_mae, masked_mse, huber_loss, masked_huber_loss
-from typing import Optional, List, Union
-from functools import partial
 import torch
 from torch import optim, Tensor
+from sklearn.preprocessing import StandardScaler
+from typing import Optional, List, Union
+from functools import partial
 
+from models import *
 from utils.data_loader import StandardScaler, get_dataloader
+from utils.metrics import masked_mae, masked_mse, huber_loss, masked_huber_loss
 
 my_logger = 'lazy'
 logger = logging.getLogger(my_logger)
@@ -24,7 +24,6 @@ class Exp_Basic(object):
         self.learning_rate = args.learning_rate
         self.weight_decay = args.weight_decay
         self.use_amp = args.use_amp
-        self.pct_start = args.pct_start
         self.patience = args.patience
         self.max_grad_norm = args.max_grad_norm
         self.need_pt = args.need_pt

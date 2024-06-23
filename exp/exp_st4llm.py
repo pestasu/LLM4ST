@@ -21,13 +21,23 @@ my_logger = 'lazy'
 logger = logging.getLogger(my_logger)
 
 class Exp_st4llm(Exp_Basic):
-    def __init__(self, args, ii):
+    def __init__(self, args, ii, accelerator=None):
         super(Exp_st4llm, self).__init__(args)
         self.cur_exp = ii
         self.mode = args.mode
+        self.accelerator = accelerator
+        train_steps = len(self.dataloader['train'])
+        train_loader, valid_loader, test_loader = self.dataloader['train'], self.dataloader['valid'], self.dataloader['test']
+        scheduler = optim.lr_scheduler.OneCycleLR(optimizer = self.optimizer,
+                                        steps_per_epoch = train_steps,
+                                        pct_start = args.pct_start,
+                                        epochs = args.train_epochs,
+                                        max_lr = args.learning_rate)
+        self.train_loader, self.valid_loader ,self.test_loader, self.model, self.optimizer, self.scheduler = accelerator.prepare(
+            train_loader, valid_loader, test_loader, self.model, self.optimizer, scheduler)
 
-    def build_model(self):
-        model = self.model_dict[self.model_name].Model(self.args).float()
+    def _build_model(self):
+        model = self.model_dict[self.model_name](self.args).float()
 
         if self.need_pt:
             pt_model = torch.load(os.path.join(self.pt_dir, "final_model.pt"), map_location='cpu')
@@ -48,8 +58,9 @@ class Exp_st4llm(Exp_Basic):
         the training process of a batch
         '''   
         self.optimizer.zero_grad()
-        x = x.to(self.device)
-        y = y[..., :1].to(self.device)
+
+        x = x.to(self.accelerator.device)
+        y = y[..., :1].to(self.accelerator.device)
 
         if self.args.mode == 'pretrain':
             rec_t, true_t, rec_s, true_s = self.model(x)
@@ -64,7 +75,7 @@ class Exp_st4llm(Exp_Basic):
             loss = self.loss_fn(pred, true) 
 
 
-        loss.backward()
+        self.accelerator.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(),
                                     max_norm=self.max_grad_norm)
         self.optimizer.step()
@@ -72,16 +83,10 @@ class Exp_st4llm(Exp_Basic):
         return loss.item()
 
     def train(self, setting):
-        train_steps = len(self.dataloader['train'])
+        train_steps = len(self.train_loader)
 
         if self.use_amp:
             grad_scaler = torch.cuda.amp.GradScaler()
-
-        scheduler = optim.lr_scheduler.OneCycleLR(optimizer = self.optimizer,
-                                        steps_per_epoch = train_steps,
-                                        pct_start = self.pct_start,
-                                        epochs = self.train_epochs,
-                                        max_lr = self.learning_rate)
 
         self.saved_epoch = -1
         self.val_losses = [np.inf]
@@ -99,7 +104,7 @@ class Exp_st4llm(Exp_Basic):
 
             logger.info('------start training!------')
             start_time = time.time()
-            for i, (batch_x, batch_y) in enumerate(self.dataloader['train']):
+            for i, (batch_x, batch_y) in enumerate(self.train_loader):
                 iter_count += 1
                 # loss, pred_loss, rec_loss = self.train_batch(batch_x, batch_y)
                 loss = self.train_batch(batch_x, batch_y)
@@ -131,7 +136,7 @@ class Exp_st4llm(Exp_Basic):
                 scheduler.step()
                 print(f'lr = {self.optimizer.param_groups[0]["lr"]:.10f}')
             else:
-                adjust_learning_rate(self.optimizer, epoch+1, self.args)
+                adjust_learning_rate(self.optimizer, epoch+1, self.args, accelerator)
 
     def valid(self, epoch):
         preds, trues = [], []
@@ -139,9 +144,9 @@ class Exp_st4llm(Exp_Basic):
         self.model.eval()
         total_time = 0
         with torch.no_grad():
-            for i, (batch_x, batch_y) in enumerate(self.dataloader['valid']):
-                batch_x = batch_x.to(self.device)
-                batch_y = batch_y[..., :1].to(self.device)
+            for i, (batch_x, batch_y) in enumerate(self.valid_loader):
+                batch_x = batch_x.to(self.accelerator.device)
+                batch_y = batch_y[..., :1].to(self.accelerator.device)
 
                 time_now = time.time()
                 if self.args.mode == 'pretrain':
@@ -192,9 +197,9 @@ class Exp_st4llm(Exp_Basic):
 
         self.model.eval()
         with torch.no_grad():
-            for i, (batch_x, batch_y) in enumerate(self.dataloader['test']):
-                batch_x = batch_x.to(self.device)
-                batch_y = batch_y[..., :1].to(self.device)
+            for i, (batch_x, batch_y) in enumerate(self.test_loader):
+                batch_x = batch_x.to(self.accelerator.device)
+                batch_y = batch_y[..., :1].to(self.accelerator.device)
 
                 if self.args.mode == 'pretrain':
                     rec_t, true_t, rec_s, true_s = self.model(batch_x)

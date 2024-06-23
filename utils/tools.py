@@ -24,7 +24,7 @@ def gen_version(args):
                 for x in dirs]) + 1
     return version
 
-def adjust_learning_rate(optimizer, epoch, args):
+def adjust_learning_rate(optimizer, epoch, args, accelerator=None):
     if args.lradj == 'type1':
         lr_adjust = {epoch: args.learning_rate * (0.5 ** (epoch - 1))}    
     elif args.lradj == 'type2':
@@ -36,8 +36,8 @@ def adjust_learning_rate(optimizer, epoch, args):
         lr = lr_adjust[epoch]
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
-        if (args.use_multi_gpu and args.local_rank == 0) or not args.use_multi_gpu:
-            print('next learning rate is {}'.format(lr))
+        if accelerator is not None:
+            accelerator.print('next learning rate is {}'.format(lr))
 
 class EarlyStopping:
     def __init__(self, args, verbose=False, delta=0):

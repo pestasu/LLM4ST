@@ -13,6 +13,10 @@ from exp import *
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
 def main(args):
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    deepspeed_plugin = DeepSpeedPlugin(hf_ds_config='./DS_ZEROS2.json')
+    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs], deepspeed_plugin=deepspeed_plugin)
+    
     config = get_config(args.model, args.data)
     config.update(vars(args))
 
@@ -47,7 +51,7 @@ def main(args):
     if config.is_training:
         for ii in range(config.n_exp):
             # setting record of experiments
-            exp = Exp(config, ii)  # set experiments
+            exp = Exp(config, ii, accelerator)  # set experiments
             # if (args.use_multi_gpu and args.local_rank == 0) or not args.use_multi_gpu:
             #     logger.info('>>>>>>>>>>>>>>>>>>>>>>>>>>start training : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
             exp.train(setting)
@@ -70,7 +74,11 @@ def main(args):
         exp = Exp(config, ii)  # set experiments
         exp.test(setting, is_test=True)
         torch.cuda.empty_cache()
-
+    accelerator.wait_for_everyone()
+    if accelerator.is_local_main_process:
+        path = Path(save_floder) / "pt"  # unique checkpoint saving path
+        del_files(path)  # delete checkpoint files
+        accelerator.print('success delete checkpoints')
 
 if __name__ == '__main__':
     fix_seed = [1111,2222,3333,4444,5555,6666,7777,8888,9999]
@@ -105,9 +113,5 @@ if __name__ == '__main__':
     parser.add_argument('--gpu', type=str, default="0", help='gpu')
     parser.add_argument('--use_multi_gpu', action='store_true', help='use multiple gpus', default=False)
     args = parser.parse_args()
-    
-    if args.use_multi_gpu:
-        args.gpu_ids = [int(x) for x in args.gpu.split(',')]
-        args.world_size = len(args.gpu_ids)
 
     main(args)

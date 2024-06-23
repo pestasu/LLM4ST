@@ -22,7 +22,7 @@ class ST4llm(nn.Module):
         super(ST4llm, self).__init__()
         assert config.mode in ["pretrain", "predict"], "Error mode."
         self.config = config
-        self.device = config.gpu
+        # self.device = config.gpu
         self.mode = config.mode
         self.seq_len = config.seq_len
         self.pred_len = config.pred_len
@@ -50,7 +50,7 @@ class ST4llm(nn.Module):
                 trust_remote_code=True,
                 local_files_only=True, 
                 config=self.gpt2_config,
-                device_map={f'': self.device}
+                # device_map={f'': self.device}
             )
             self.tokenizer = GPT2Tokenizer.from_pretrained(
                 'pretrained_model/openai-community/gpt2/',
@@ -79,7 +79,7 @@ class ST4llm(nn.Module):
                 trust_remote_code=True,
                 local_files_only=True, 
                 config=self.llama_config,
-                device_map={f'': self.device}
+                # device_map={f'': self.device}
             )
 
             self.tokenizer = LlamaTokenizer.from_pretrained(
@@ -158,8 +158,6 @@ class ST4llm(nn.Module):
         return hidden_states_t, masked_tokens_t, hidden_states_s, masked_tokens_s
 
     def predict(self, llm_input):
-        llm_input2 = llm_input
-        llm_input = llm_input[:, :12]
         llm_out = self.backbone_llm(inputs_embeds=llm_input).last_hidden_state
         torch.cuda.empty_cache()
         llm_out = llm_out[..., :self.d_ff]
