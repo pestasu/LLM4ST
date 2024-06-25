@@ -90,6 +90,7 @@ class PatchEmbedding_2d(nn.Module):
         # B*N,  C, L, 1
         long_term_history = long_term_history.reshape(batch_size*num_nodes, num_feat, len_time_series, 1)
         # B*N,  d, L/P, 1
+        # long_term_history = long_term_history.to(torch.bfloat16)
         output = self.input_embedding(long_term_history)
         # norm
         output = self.norm_layer(output)

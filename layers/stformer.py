@@ -151,6 +151,7 @@ class SFormer(nn.Module):
         # hidden_states_full = torch.cat([hidden_states_unmasked, hidden_states_masked], dim=1)   # B, P, N, d
         # concatanate according to the sequence order
         hidden_states_full = torch.zeros(batch_size, num_nodes + len(masked_token_index), num_patches, hidden_states_unmasked.shape[-1], device=hidden_states_unmasked.device)
+        # hidden_states_full = hidden_states_full.to(torch.bfloat16)
         hidden_states_full[:, masked_token_index] = hidden_states_masked
         hidden_states_full[:, unmasked_token_index] = hidden_states_unmasked
 
@@ -302,6 +303,7 @@ class TFormer(nn.Module):
         # hidden_states_full = torch.cat([hidden_states_unmasked, hidden_states_masked], dim=-2)   # B, N, P, d
         # concatanate according to the sequence order
         hidden_states_full = torch.zeros(batch_size, num_nodes, num_patches + len(masked_token_index), hidden_states_unmasked.shape[-1], device=hidden_states_unmasked.device)
+        # hidden_states_full = hidden_states_full.to(torch.bfloat16)
         hidden_states_full[:,:,masked_token_index] = hidden_states_masked
         hidden_states_full[:,:,unmasked_token_index] = hidden_states_unmasked
 
@@ -330,7 +332,6 @@ class TFormer(nn.Module):
         """
         # get reconstructed masked tokens
         batch_size, num_nodes, num_patches, _ = reconstruction_full.shape
-
         reconstruction_masked_tokens = reconstruction_full[:, :, masked_token_index, :]     # B, N, r*P, d
         reconstruction_masked_tokens = reconstruction_masked_tokens.view(batch_size, num_nodes, -1).transpose(1, 2) # B, r*P*d, N
 

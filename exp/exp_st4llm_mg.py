@@ -21,12 +21,24 @@ warnings.filterwarnings('ignore')
 my_logger = 'lazy'
 logger = logging.getLogger(my_logger)
 
-class Exp_st4llm(Exp_Basic):
-    def __init__(self, args, ii):
-        super(Exp_st4llm, self).__init__(args)
+class Exp_st4llm_mg(Exp_Basic):
+    def __init__(self, args, ii, accelerator=None):
+        super(Exp_st4llm_mg, self).__init__(args)
         self.cur_exp = ii
         self.mode = args.mode
+        self.accelerator = accelerator
         self.train_loader, self.valid_loader, self.test_loader = self.dataloader['train'], self.dataloader['valid'], self.dataloader['test']
+        train_steps = len(self.dataloader['train'])
+        scheduler = optim.lr_scheduler.OneCycleLR(optimizer = self.optimizer,
+                                        steps_per_epoch = train_steps,
+                                        pct_start = args.pct_start,
+                                        epochs = args.train_epochs,
+                                        max_lr = args.learning_rate)
+        self.train_loader, self.valid_loader ,self.test_loader, self.model, self.optimizer, self.scheduler = accelerator.prepare(
+            self.train_loader, self.valid_loader ,self.test_loader, self.model, self.optimizer, scheduler)
+
+    def _build_model(self):
+        return self.model_dict[self.model_name](self.args).float()
 
     def early_stop(self, epoch, best_loss):
         logger.info(f'Early stop at epoch {epoch}, loss = {best_loss:.6f}')
@@ -37,24 +49,24 @@ class Exp_st4llm(Exp_Basic):
         the training process of a batch
         '''   
         self.optimizer.zero_grad()
+        with self.accelerator.autocast():
+            x = x.to(self.accelerator.device)
+            y = y[..., :1].to(self.accelerator.device)
 
-        x = x.to(self.device)
-        y = y[..., :1].to(self.device)
-
-        if self.args.mode == 'pretrain':
-            rec_t, true_t, rec_s, true_s = self.model(x)
-            rec_t, true_t = self._inverse_transform([rec_t, true_t])
-            rec_s, true_s = self._inverse_transform([rec_s, true_s])
-            loss_rec_t = self.loss_fn(rec_t, true_t)
-            loss_rec_s = self.loss_fn(rec_s, true_s)
-            loss = loss_rec_t + loss_rec_s
-        else:
-            output = self.model(x)
-            pred, true = self._inverse_transform([output, y])
-            loss = self.loss_fn(pred, true) 
+            if self.args.mode == 'pretrain':
+                rec_t, true_t, rec_s, true_s = self.model(x)
+                rec_t, true_t = self._inverse_transform([rec_t, true_t])
+                rec_s, true_s = self._inverse_transform([rec_s, true_s])
+                loss_rec_t = self.loss_fn(rec_t, true_t)
+                loss_rec_s = self.loss_fn(rec_s, true_s)
+                loss = loss_rec_t + loss_rec_s
+            else:
+                output = self.model(x)
+                pred, true = self._inverse_transform([outputs, y])
+                loss = self.loss_fn(pred, true) 
 
 
-        loss.backward(loss)
+        self.accelerator.backward(loss)
         torch.nn.utils.clip_grad_norm_(self.model.parameters(),
                                     max_norm=self.max_grad_norm)
         self.optimizer.step()
@@ -113,9 +125,9 @@ class Exp_st4llm(Exp_Basic):
 
             if self.lr_adj == 'cosine':
                 scheduler.step()
-                print(f'lr = {self.optimizer.param_groups[0]["lr"]:.10f}')
+                self.accelerator.print(f'lr = {self.optimizer.param_groups[0]["lr"]:.10f}')
             else:
-                adjust_learning_rate(self.optimizer, epoch+1, self.args)
+                adjust_learning_rate(self.optimizer, epoch+1, self.args, self.accelerator)
 
     def valid(self, epoch):
         preds, trues = [], []
@@ -124,8 +136,8 @@ class Exp_st4llm(Exp_Basic):
         total_time = 0
         with torch.no_grad():
             for i, (batch_x, batch_y) in enumerate(self.valid_loader):
-                batch_x = batch_x.to(self.device)
-                batch_y = batch_y[..., :1].to(self.device)
+                batch_x = batch_x.to(self.accelerator.device)
+                batch_y = batch_y[..., :1].to(self.accelerator.device)
 
                 time_now = time.time()
                 if self.args.mode == 'pretrain':
@@ -139,7 +151,7 @@ class Exp_st4llm(Exp_Basic):
 
                 else:
                     output = self.model(batch_x)
-                    pred, true = self._inverse_transform([output, batch_y])
+                    pred, true = self._inverse_transform([outputs, y])
                     preds.append(pred.cpu())
                     trues.append(true.cpu())
 
@@ -177,8 +189,8 @@ class Exp_st4llm(Exp_Basic):
         self.model.eval()
         with torch.no_grad():
             for i, (batch_x, batch_y) in enumerate(self.test_loader):
-                batch_x = batch_x.to(self.device)
-                batch_y = batch_y[..., :1].to(self.device)
+                batch_x = batch_x.to(self.accelerator.device)
+                batch_y = batch_y[..., :1].to(self.accelerator.device)
 
                 if self.args.mode == 'pretrain':
                     rec_t, true_t, rec_s, true_s = self.model(batch_x)
@@ -190,13 +202,18 @@ class Exp_st4llm(Exp_Basic):
                     trues2.append(true_s.cpu())
                 else:
                     output = self.model(batch_x)
-                    pred, true = self._inverse_transform([output, batch_y])
+                    pred, true = self._inverse_transform([outputs, y])
                     preds.append(pred.cpu())
                     trues.append(true.cpu())
                 
         preds = torch.cat(preds, dim=0)
         trues = torch.cat(trues, dim=0)
 
+        # dist.init_process_group(backend='nccl', timeout=timedelta(minutes=30))
+        # all_preds = self.accelerator.gather(torch.tensor(preds, device=self.accelerator.device))
+        # all_labels = self.accelerator.gather(torch.tensor(trues, device=self.accelerator.device))
+
+        # if self.accelerator.is_main_process:
         if self.mode == 'pretrain':
             preds2 = torch.cat(preds2, dim=0)
             trues2 = torch.cat(trues2, dim=0)

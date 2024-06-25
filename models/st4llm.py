@@ -36,8 +36,8 @@ class ST4llm(nn.Module):
         self.tformer = TFormer(config)
         self.sformer = SFormer(config)
         # load pre-trained st model
-        # if self.mode == 'predict':
-        #     self.load_pre_trained_model()
+        if self.mode == 'predict':
+            self.load_pre_trained_model()
         
         if config.backbone == 'gpt2':
             self.gpt2_config = GPT2Config.from_pretrained('pretrained_model/openai-community/gpt2/')
@@ -109,12 +109,13 @@ class ST4llm(nn.Module):
         self.aligning_t_layer = QFormerST(self.d_model, n_heads=2, d_keys=self.d_ff, d_llm=self.d_llm)
         self.aligning_s_layer = QFormerST(self.d_model, n_heads=2, d_keys=self.d_ff, d_llm=self.d_llm)
 
-        self.output_projection_t = nn.Linear(self.seq_len, self.pred_len)
+        self.patch_transform = nn.Conv2d(
+                                self.d_llm,
+                                self.d_llm,
+                                kernel_size=(1, config.patch_size),
+                                stride=(1, config.patch_size))
 
-
-        self.output_projection_s = nn.Linear(self.seq_len, self.pred_len)
-
-        self.output_projection = nn.Linear(self.d_ff*2, 1)
+        self.output_projection = nn.Linear(self.d_ff*2, self.pred_len)
 
         if self.prompt_tuning:
             self.prompt_embedding = nn.Parameter(
@@ -126,21 +127,34 @@ class ST4llm(nn.Module):
                 )
             )
 
-    def load_pre_trained_model(self, tem_pretrained_path=None, spa_pretrained_path=None):
+    def load_pre_trained_model(self, pretrained_path='final_model_0.pt'):
         """Load pre-trained model"""
         # load parameters
-        checkpoint_root_path = f'pretrained_model/{self.config.model}'
-        checkpoint_dict = torch.load(os.path.join(checkpoint_root_path, tem_pretrained_path))
-        self.tmae.load_state_dict(checkpoint_dict["model_state_dict"])
-        
-        checkpoint_dict = torch.load(os.path.join(checkpoint_root_path, spa_pretrained_path))
-        self.smae.load_state_dict(checkpoint_dict["model_state_dict"])
-        
+        checkpoint_root_path = f'pretrained_model/{self.config.model}/{self.config.data}'
+        checkpoint_dict = torch.load(os.path.join(checkpoint_root_path, pretrained_path))
+        state_dict_t = self.tformer.state_dict()
+        state_dict_s = self.sformer.state_dict()
+
+        new_state_dict_t, new_state_dict_s = {}, {}
+        for k, v in state_dict_t.items():
+            k = k.replace('module.', '')
+            new_state_dict_t[k] = v
+        state_dict_t.update(new_state_dict_t)
+        self.tformer.load_state_dict(state_dict_t)
+
+        for k, v in state_dict_s.items():
+            k = k.replace('module.', '')
+            new_state_dict_s[k] = v
+        state_dict_s.update(new_state_dict_s)
+        self.sformer.load_state_dict(state_dict_s)
+
         # freeze parameters
-        for param in self.tmae.parameters():
+        for param in self.tformer.parameters():
             param.requires_grad = False
-        for param in self.smae.parameters():
+        for param in self.sformer.parameters():
             param.requires_grad = False
+
+        print("***********The pretrain model is loaded..")
     
     def pretrain(self, long_history):
         """Feed forward of STDMAE.
@@ -159,7 +173,6 @@ class ST4llm(nn.Module):
 
     def predict(self, llm_input):
         llm_out = self.backbone_llm(inputs_embeds=llm_input).last_hidden_state
-        torch.cuda.empty_cache()
         llm_out = llm_out[..., :self.d_ff]
         return llm_out
 
@@ -184,8 +197,8 @@ class ST4llm(nn.Module):
                 inputs_embeds = torch.cat(
                     [self.prompt_embedding[None, :, :].repeat((bs, 1, 1)), inputs_embeds], dim=1
                 )  # [bs, prompt_len+max_seq_len, d_emb]
-            prompt_embedding_t, source_embedding_t = self.get_manual_prompt_t(short_term_history[..., :1])
-            prompt_embedding_s, source_embedding_s = self.get_manual_prompt_s(short_term_history[..., :1])
+            prompt_embedding_t, source_embedding_t = self.get_manual_prompt_t(short_term_history) # [B, N, *, d_llm]
+            prompt_embedding_s, source_embedding_s = self.get_manual_prompt_s(short_term_history) # [B, T, *, d_llm]
             
             short_term_history = short_term_history.contiguous()
             x_embed = self.enc_embedding(short_term_history)
@@ -196,28 +209,30 @@ class ST4llm(nn.Module):
             _, _, Pt, Dt = extracted_feature_t.shape
             _, _, Ps, Ds = extracted_feature_s.shape
 
-            extracted_feature_t = extracted_feature_t.reshape(B*N, Pt, Dt) 
+            extracted_feature_t = extracted_feature_t.reshape(B*N, Pt, Dt)
             extracted_feature_s = extracted_feature_s.permute(0, 2, 1, 3).reshape(B*Ps, N, Ds)
             aligned_feature_t = self.aligning_t_layer(extracted_feature_t, source_embedding_t, source_embedding_t) # [B*N, Pt, d_llm]
             aligned_feature_s = self.aligning_s_layer(extracted_feature_s, source_embedding_s, source_embedding_s) # [B*Ps, N, d_llm]
 
-            aligned_feature_t = aligned_feature_t.reshape(B, N, Pt, -1)
-            aligned_feature_s = aligned_feature_s.reshape(B, Ps, N, -1)
-            llm_inp_t = torch.cat([prompt_embedding_t, aligned_feature_t], dim=2).reshape(B*N, -1, self.d_llm) # [B, N, Lt+Pt, d_llm]
-            llm_inp_s = torch.cat([prompt_embedding_s, aligned_feature_s[:, -T:]], dim=2).reshape(B*T, -1, self.d_llm) # [B, T, Ls+N, d_llm]
-            dec_out_t = self.predict(llm_inp_t).reshape(B, N, -1, D)
-            dec_out_s = self.predict(llm_inp_s).reshape(B, T, -1, D)
-            dec_out_t = dec_out_t[:, :, -T:].permute(0, 3, 1, 2) # B, D, N, T
-            dec_out_s = dec_out_s[:, :, -N:].permute(0, 3, 2, 1) # B, T, N, D
+            aligned_feature_t = aligned_feature_t.reshape(B, N, Pt, -1)[:,:,-1:] # [B, N, Pt, d_llm]
+            aligned_feature_s = aligned_feature_s.reshape(B, Ps, N, -1)[:,-1:] # [B, Ps, N, d_llm]
+            prompt_embedding_s = self.patch_transform(prompt_embedding_s.permute(0,3,2,1)).permute(0,3,2,1)
 
-            dec_out_t = self.output_projection_t(dec_out_t).permute(0, 3, 2, 1) # B, L, N, d
-            dec_out_s = self.output_projection_s(dec_out_s).permute(0, 3, 2, 1) # B, L, N, d
-            dec_out = torch.cat((dec_out_t, dec_out_s), -1)
+            llm_inp_t = torch.cat([prompt_embedding_t, aligned_feature_t], dim=2).reshape(B*N, -1, self.d_llm) # [B, N, Lt+Pt, d_llm]
+            llm_inp_s = torch.cat([prompt_embedding_s, aligned_feature_s], dim=2).reshape(B, -1, self.d_llm) # [B, T, Ls+N, d_llm]
+            dec_out_t = self.predict(llm_inp_t).reshape(B, N, -1, self.d_ff) # B, N, Lt+Pt, D
+            dec_out_s = self.predict(llm_inp_s).reshape(B, 1, -1, self.d_ff) # B, 1, Ls+N, D
+
+            dec_out_t = dec_out_t[:, :, -1:].squeeze(-2) # B, N, D
+            dec_out_s = dec_out_s[:, :, -N:].squeeze(1) # B, T, N, D
+            dec_out = torch.cat([dec_out_t, dec_out_s], -1)
             dec_out = self.output_projection(dec_out)
+            dec_out = dec_out.unsqueeze(-1).transpose(1, 2)
         
             return dec_out
     
-    def get_manual_prompt_t(self, short_history):
+    def get_manual_prompt_t(self, short_term_history):
+        short_history = short_term_history[...,:1]
         B, T, N, C = short_history.size()
 
         # time features
@@ -226,6 +241,8 @@ class ST4llm(nn.Module):
         medians_t = torch.median(short_history, dim=1).values
         trends = short_history.diff(dim=1).sum(dim=1) 
         adj_mx = load_pkl(os.path.join(self.config.data_root_path, 'adj_mx.pkl'))
+        if 'AIR' in self.config.data:
+            adj_mx = adj_mx[2]
 
         prompts = []
         for b in range(B):
@@ -256,7 +273,8 @@ class ST4llm(nn.Module):
 
         return prompt_embedding_t, source_embedding_t
 
-    def get_manual_prompt_s(self, short_history):
+    def get_manual_prompt_s(self, short_term_history):
+        short_history = short_term_history[...,:1]
         B, T, N, C = short_history.size()
 
         # space features
@@ -270,13 +288,16 @@ class ST4llm(nn.Module):
                 min_s_str = str(min_values_s[b, t].tolist())
                 max_s_str = str(max_values_s[b, t].tolist())
                 median_s_str = str(medians_s[b, t].tolist())
+                day_of_week = short_term_history[b,t,0,1]
+                hour_of_day = short_term_history[b,t,0,2]
                 prompt = (
                 f"<|start_prompt|>Dataset description: Traffic flow prediction using space features."
                 f"Task description: forecast the next {str(self.pred_len)} steps given the previous {str(self.seq_len)} steps traffic flow; "
                 "Input statistics: "
                 f"min value {min_s_str}, "
                 f"max value {max_s_str}, "
-                f"median value {median_s_str}"
+                f"median value {median_s_str},"
+                f"The day of the week is {day_of_week}, and the hour of the day is {hour_of_day}."
                 )
                 prompts.append(prompt)
 

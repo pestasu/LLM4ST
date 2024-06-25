@@ -10,7 +10,7 @@ from pathlib import Path
 from utils.tools import set_logger, serializable_parts_of_dict, gen_version
 from config.config import get_config 
 from exp import *
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
 
 def main(args):
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
@@ -45,7 +45,7 @@ def main(args):
     logger.info(f'>>>>>>>>>>>>>>>>>>>>>>>>>> [ {config.model}-{config.data}({config.version}) ]<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<')
 
     import exp
-    exp_name = f'Exp_{args.model}'
+    exp_name = f'Exp_{args.model}_mg'
     Exp = getattr(exp, exp_name)
 
     if config.is_training:

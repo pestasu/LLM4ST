@@ -102,7 +102,7 @@ if __name__ == '__main__':
     parser.add_argument('--patience', type=int, default=5)
 
     # GPU
-    parser.add_argument('--gpu', type=str, default="0", help='gpu')
+    parser.add_argument('--gpu', type=int, default=0, help='gpu')
     parser.add_argument('--use_multi_gpu', action='store_true', help='use multiple gpus', default=False)
     args = parser.parse_args()
     
